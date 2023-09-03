@@ -1,0 +1,52 @@
+---
+- name: Install Docker on Ubuntu
+  hosts: server
+  become: true
+  vars_prompt:
+    - name: username
+      prompt: What is your username?
+      private: false
+
+  tasks:
+    - name: Install prerequisites
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+
+    - name: Create /etc/apt/keyrings directory
+      command: install -m 0755 -d /etc/apt/keyrings
+
+    - name: Download and add Docker GPG key to keyring
+      command: sh -c 'curl -sSf https://download.docker.com/linux/ubuntu/gpg | gpg --yes --dearmor -o /etc/apt/keyrings/docker.gpg'
+      become: true
+
+    - name: Set read permission on docker.gpg keyring
+      command: chmod a+r /etc/apt/keyrings/docker.gpg
+
+    - name: Add Docker repository to sources list
+      shell: echo   "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" > /etc/apt/sources.list.d/docker.list
+      become: true
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Add user to docker group
+      user:
+        name: "{{ username }}"
+        groups: docker
+        append: yes
