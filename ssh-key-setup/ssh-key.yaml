@@ -1,0 +1,73 @@
+---
+- hosts: server
+  gather_facts: no
+  remote_user: root
+  vars_prompt:
+    - name: username
+      prompt: What is your username?
+      private: false
+
+    - name: password
+      prompt: What is your new account password?
+      private: true
+
+  tasks:
+    - name: Install whois
+      ansible.builtin.apt:
+        name: whois
+        state: latest
+        update_cache: yes
+
+    - name: Generate password hash
+      run_once: true
+      shell: "mkpasswd --method=SHA-512 {{ password | quote }}"
+      register: password_hash
+
+    - name: Generate ssh key
+      local_action:
+        module: shell
+        args:
+          chdir: "{{ playbook_dir }}"
+          executable: /bin/bash
+          cmd: 'ssh-keygen -q -t rsa -N "" -f id_rsa <<<"y\n" >/dev/null 2>&1'
+
+
+    - name: Add new user
+      user:
+        name: "{{ username }}"
+        password: "{{ password_hash.stdout }}"
+        # group: "{{ username }}"
+        shell: /bin/bash
+        groups: sudo
+        append: yes
+
+    - name: Deploy SSH Key
+      authorized_key:
+        user: "{{ username }}"
+        key: "{{ lookup('file', 'id_rsa.pub') }}"
+        state: present
+
+    - name: Disable Password Authentication
+      lineinfile:
+        dest: /etc/ssh/sshd_config
+        regexp: '^PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        state: present
+        backup: yes
+  
+
+    - name: Disable Root Login
+      lineinfile:
+        dest: /etc/ssh/sshd_config
+        regexp: '^PermitRootLogin'
+        line: 'PermitRootLogin no'
+        state: present
+        backup: yes
+      notify:
+        - restart ssh
+
+  handlers:
+    - name: restart ssh
+      service:
+        name: sshd
+        state: restarted
