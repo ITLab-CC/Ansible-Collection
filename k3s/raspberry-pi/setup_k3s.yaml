@@ -1,0 +1,120 @@
+---
+- name: Prepare Raspberry Pis
+  hosts: all
+  become: yes
+  tasks:
+    - name: Set hostname based on inventory name
+      hostname:
+        name: "{{ inventory_hostname }}"
+    
+    - name: Update and upgrade packages
+      apt:
+        update_cache: yes
+        upgrade: yes
+
+    - name: Read /boot/cmdline.txt
+      slurp:
+        src: /boot/cmdline.txt
+      register: cmdline_content
+
+    - name: Check if cgroup settings exist
+      set_fact:
+        cgroup_exists: "{{ 'cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1' in (cmdline_content['content'] | b64decode) }}"
+
+    - name: Add cgroup settings if not exist
+      block:
+        - name: Write current content to temporary file
+          copy:
+            content: "{{ cmdline_content['content'] | b64decode }}"
+            dest: "/tmp/cmdline.txt"
+        
+        - name: Append cgroup settings to temporary file
+          lineinfile:
+            path: "/tmp/cmdline.txt"
+            line: "{{ cmdline_content['content'] | b64decode | trim }} cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1"
+            create: no
+            state: present
+            backrefs: yes
+            regexp: '^(.*)$'
+            mode: '0644'
+        
+        - name: Replace /boot/cmdline.txt with updated content
+          copy:
+            src: "/tmp/cmdline.txt"
+            dest: "/boot/cmdline.txt"
+            mode: '0755'
+            force: yes
+      when: not cgroup_exists
+
+    - name: Flush iptables
+      command: iptables -F
+
+    - name: Set ip6tables to legacy
+      command: update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+
+    - name: Reboot
+      command: reboot
+      async: 1
+      poll: 0
+      ignore_errors: 'True'
+
+    - name: Wait for Raspberry Pi to restart
+      delegate_to: localhost
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        state: started
+        delay: 30
+        timeout: 300
+
+- name: Setup k3s on master node
+  hosts: master
+  become: yes
+  tasks:
+    - name: Download k3s installation script
+      uri:
+        url: https://get.k3s.io
+        return_content: yes
+        dest: /tmp/k3s_install.sh
+        mode: '0755'
+
+    - name: Execute k3s installation script
+      shell: /tmp/k3s_install.sh
+    
+    - name: Wait for master to be ready (just to be safe)
+      wait_for:
+        port: 6443
+        state: started
+        delay: 10
+        timeout: 120
+
+    - name: Get k3s token
+      command: cat /var/lib/rancher/k3s/server/node-token
+      register: master_token
+      changed_when: false
+
+    - name: Display k3s token
+      debug:
+        var: master_token.stdout
+
+- name: Setup k3s on agent nodes
+  hosts: agents
+  become: yes
+  tasks:
+    - name: Download k3s agent installation script
+      uri:
+        url: https://get.k3s.io
+        return_content: yes
+        dest: /tmp/k3s_agent_install.sh
+        mode: '0755'
+
+    - name: Execute k3s agent installation script with master token and URL
+      shell: K3S_URL=https://{{ hostvars[groups['master'][0]]['inventory_hostname'] }}:6443 K3S_TOKEN={{ hostvars[groups['master'][0]]['master_token'].stdout }} /tmp/k3s_agent_install.sh
+
+- name: Assign worker role to agent nodes
+  hosts: master
+  become: yes
+  tasks:
+    - name: Label each agent node as worker
+      command: kubectl label nodes {{ item }} kubernetes.io/role=worker --overwrite
+      with_items: "{{ groups['agents'] }}"
