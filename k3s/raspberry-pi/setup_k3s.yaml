@@ -1,16 +1,32 @@
 ---
-- name: Prepare Raspberry Pis
+- name: Check if k3s is installed on all nodes
+  hosts: all
+  tasks:
+    - name: Check if k3s is installed
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_installed
+
+    - name: Set fact if k3s was not installed
+      set_fact:
+        k3s_was_not_installed: true
+      when: not k3s_installed.stat.exists
+
+
+- name: Setup k3s on Raspberry Pis if not already installed
   hosts: all
   become: yes
   tasks:
     - name: Set hostname based on inventory name
       hostname:
         name: "{{ inventory_hostname }}"
-    
+      when: not k3s_installed.stat.exists
+
     - name: Update and upgrade packages
       apt:
         update_cache: yes
         upgrade: yes
+      when: not k3s_installed.stat.exists
 
     - name: Read /boot/cmdline.txt
       slurp:
@@ -48,15 +64,18 @@
 
     - name: Flush iptables
       command: iptables -F
+      when: not k3s_installed.stat.exists
 
     - name: Set ip6tables to legacy
       command: update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+      when: not k3s_installed.stat.exists
 
     - name: Reboot
       command: reboot
       async: 1
       poll: 0
-      ignore_errors: 'True'
+      ignore_errors: true
+      when: not k3s_installed.stat.exists
 
     - name: Wait for Raspberry Pi to restart
       delegate_to: localhost
@@ -66,8 +85,9 @@
         state: started
         delay: 30
         timeout: 300
+      when: not k3s_installed.stat.exists
 
-- name: Setup k3s on master node
+- name: Setup k3s on master node if not already installed
   hosts: master
   become: yes
   tasks:
@@ -77,9 +97,11 @@
         return_content: yes
         dest: /tmp/k3s_install.sh
         mode: '0755'
+      when: not k3s_installed.stat.exists
 
     - name: Execute k3s installation script
       shell: /tmp/k3s_install.sh
+      when: not k3s_installed.stat.exists
     
     - name: Wait for master to be ready (just to be safe)
       wait_for:
@@ -87,6 +109,7 @@
         state: started
         delay: 10
         timeout: 120
+      when: not k3s_installed.stat.exists
 
     - name: Get k3s token
       command: cat /var/lib/rancher/k3s/server/node-token
@@ -97,7 +120,7 @@
       debug:
         var: master_token.stdout
 
-- name: Setup k3s on agent nodes
+- name: Setup k3s on agent nodes if not already installed
   hosts: agents
   become: yes
   tasks:
@@ -107,14 +130,17 @@
         return_content: yes
         dest: /tmp/k3s_agent_install.sh
         mode: '0755'
+      when: not k3s_installed.stat.exists
 
     - name: Execute k3s agent installation script with master token and URL
       shell: K3S_URL=https://{{ hostvars[groups['master'][0]]['inventory_hostname'] }}:6443 K3S_TOKEN={{ hostvars[groups['master'][0]]['master_token'].stdout }} /tmp/k3s_agent_install.sh
+      when: not k3s_installed.stat.exists
 
-- name: Assign worker role to agent nodes
+- name: Assign worker role to agent nodes for new installations
   hosts: master
   become: yes
   tasks:
     - name: Label each agent node as worker
-      command: kubectl label nodes {{ item }} kubernetes.io/role=worker --overwrite
+      command: kubectl label nodes {{ item | lower }} kubernetes.io/role=worker --overwrite
       with_items: "{{ groups['agents'] }}"
+      when: hostvars[item]['k3s_was_not_installed'] | default(false)
